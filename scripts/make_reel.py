@@ -11,7 +11,7 @@ sun'iy kadrlar ishlatiladi - faqat dizaynni tekshirish uchun.
 Natija: out/reel.mp4, out/caption.txt, out/preview.jpg, out/info.json
 Navbat va ishlatilgan kliplar: state/state.json (workflow repoga qaytarib saqlaydi).
 """
-import json, os, random, re, subprocess, sys, pathlib, shutil, textwrap, urllib.request, urllib.parse, urllib.error
+import base64, json, os, random, re, subprocess, time, sys, pathlib, shutil, textwrap, urllib.request, urllib.parse, urllib.error
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -69,13 +69,100 @@ def best_file(video):
     return files[0] if files else None
 
 
-def fetch_clip(query, used, dest):
-    for q in [query] + random.sample(FALLBACK_Q, len(FALLBACK_Q)):
-        vids = [v for v in pexels_search(q) if v["id"] not in used and v.get("duration", 0) >= 5 and best_file(v)
-                and not PEOPLE.search((v.get("url") or "").lower().replace("-", " "))]
+# ---------- Gemini: kadr matnga mosmi va odobga to'g'rimi ----------
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+_model = None
+
+
+def gemini_model():
+    """Bepul ishlaydigan eng yangi 'flash' modelni o'zi topadi (nomlar tez-tez yangilanadi)."""
+    global _model
+    if _model is not None:
+        return _model
+    _model = ""
+    try:
+        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+                                     headers={"x-goog-api-key": GEMINI_KEY})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            models = json.load(r).get("models", [])
+        names = [m["name"].split("/", 1)[1] for m in models
+                 if "generateContent" in m.get("supportedGenerationMethods", [])
+                 and re.fullmatch(r"gemini-\d+(\.\d+)?-flash(-latest)?", m["name"].split("/", 1)[1])]
+        ver = lambda n: float(re.search(r"gemini-(\d+(?:\.\d+)?)", n).group(1))
+        names.sort(key=lambda n: (ver(n), not n.endswith("latest")), reverse=True)
+        _model = names[0] if names else ""
+    except Exception as e:  # noqa: BLE001
+        print(f"  Gemini modellar ro'yxati olinmadi: {e}")
+    print(f"  Gemini modeli: {_model or '-'}")
+    return _model
+
+
+def gemini_pick(caption, vids):
+    """Nomzod kadrlar ichidan matnga eng mosini tanlaydi. Odobsiz/nomaqbul kadrlarni rad etadi.
+    Qaytaradi: (video yoki None, ball). Gemini ishlamasa (None, -1)."""
+    model = gemini_model() if GEMINI_KEY else ""
+    if not model:
+        return None, -1
+    parts = [{"text": (
+        "You pick a stock video clip for a short, wordless Instagram reel with home and kitchen tips. "
+        f'The on-screen caption for this clip is: "{caption}".\n'
+        f"Below are {len(vids)} candidate frames, numbered 1 to {len(vids)} in order.\n"
+        "Reject a frame if it shows: a person in revealing clothing (shorts, short skirt, bare shoulders, swimwear), "
+        "alcohol, pork, religious symbols or holiday decorations, anything spooky, or a messy or unappetizing scene. "
+        "Hands doing a task are fine. Among the acceptable frames pick the one that best shows the caption "
+        "literally, so a viewer understands the tip from the picture. "
+        'Answer with JSON only: {"best": <number, 0 if none is acceptable>, "score": <0-10 how well it shows the caption>}')}]
+    for v in vids:
+        req = urllib.request.Request(v["image"], headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            img = r.read()
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}})
+    body = {"contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(body).encode(), headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                resp = json.load(r)
+            text = "".join(p.get("text", "") for p in resp["candidates"][0]["content"]["parts"] if not p.get("thought"))
+            ans = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
+            best, score = int(ans.get("best", 0)), float(ans.get("score", 0))
+            time.sleep(4)   # bepul limit: daqiqasiga bir necha so'rov
+            return (vids[best - 1] if 1 <= best <= len(vids) else None), score
+        except urllib.error.HTTPError as e:
+            print(f"  Gemini {e.code}: {e.read()[:200]!r}")
+            if e.code in (429, 500, 503):
+                time.sleep(20 * (attempt + 1)); continue
+            break
+        except Exception as e:  # noqa: BLE001
+            print(f"  Gemini javobi tushunilmadi: {e}")
+            break
+    return None, -1
+
+
+def fetch_clip(query, used, dest, caption=""):
+    first = None   # Gemini hammasini rad etsa - birinchi so'zdagi filtrdan o'tgan klip olinadi
+    for q in [query] + random.sample(FALLBACK_Q, 2) + [None]:
+        if q is None:
+            if not first:
+                break
+            q, vids, caption = query, first, ""
+        else:
+            vids = [v for v in pexels_search(q) if v["id"] not in used and v.get("duration", 0) >= 5 and best_file(v)
+                    and not PEOPLE.search((v.get("url") or "").lower().replace("-", " "))]
+            first = first or vids
         if not vids:
             continue
-        v = random.choice(vids[:8])
+        v, score = gemini_pick(caption, vids[:6]) if caption else (None, -1)
+        if score == -1:            # Gemini yo'q yoki ishlamadi - avvalgidek tasodifiy
+            v = random.choice(vids[:8])
+        elif v is None or score < 5:
+            print(f"  [{q}] mos kadr topilmadi (ball {score}), keyingi so'zga o'tiladi")
+            continue
+        else:
+            print(f"  Gemini tanladi: ball {score}")
         f = best_file(v)
         req = urllib.request.Request(f["link"], headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as out:
@@ -119,7 +206,7 @@ def text_layer(lines_text, kind):
     small = ImageFont.truetype(FONT, 34)
     d.text((W // 2, 210), HANDLE, font=small, fill=CREAM + (210,), anchor="mm",
            stroke_width=2, stroke_fill=INK + (120,))
-    size, width, cy = (84, 16, 560) if kind == "hook" else (70, 20, 1220)
+    size, width, cy = (84, 20, 560) if kind == "hook" else (70, 20, 1220)
     font = ImageFont.truetype(FONT, size)
     lines = balanced(lines_text, width)
     lh = int(size * 1.18)
@@ -221,12 +308,16 @@ def build_audio(queries, total):
 
 
 # ---------- yig'ish ----------
-def segment(src, dur, start, overlay_png, dest):
+def segment(src, dur, start, overlay_png, dest, animate=True):
+    # 1-kadrda sarlavha darhol ko'rinadi (odam birinchi soniyada to'xtashi uchun), qolganlari chiqib keladi
+    txt = ("[1:v]format=rgba,fade=t=in:st=0.1:d=0.35:alpha=1[t];[v][t]overlay=x=0:y='if(lt(t,0.5),45*(1-t/0.5),0)'"
+           if animate else "[1:v]format=rgba[t];[v][t]overlay=0:0")
     run(["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{CLIP_S}", "-i", str(src),
          "-loop", "1", "-t", f"{CLIP_S}", "-i", str(overlay_png),
          "-filter_complex",
-         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS},setsar=1[v];"
-         f"[1:v]format=rgba,fade=t=in:st=0.1:d=0.3:alpha=1[t];[v][t]overlay=0:0,format=yuv420p[o]",
+         f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS},setsar=1,"
+         f"eq=contrast=1.04:saturation=1.08:brightness=0.01,colorbalance=rs=0.04:gs=0.01:bs=-0.04[v];"
+         f"{txt},format=yuv420p[o]",
          "-map", "[o]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", str(FPS), str(dest)])
 
 
@@ -242,18 +333,18 @@ def main():
     print(f"Mavzu {idx + 1}/{len(TOPICS)}: {topic['hook']}")
     used = set(state.get("used_videos", []))
 
-    texts = [(topic["hook"], "hook")] + [(t, "tip") for t in topic["tips"]]
-    queries = [topic["queries"][0]] + topic["queries"]
+    texts = [(topic["hook"], "hook")] + [(t, "tip") for t, _ in topic["tips"]]
+    queries = [topic["hook_q"]] + [q for _, q in topic["tips"]]
     segs, clips = [], []
     for i, ((txt, kind), q) in enumerate(zip(texts, queries)):
         raw = TMP / f"raw{i}.mp4"
-        info = fake_clip(i, raw) if LOCAL else fetch_clip(q, used, raw)
+        info = fake_clip(i, raw) if LOCAL else fetch_clip(q, used, raw, caption=txt)
         used.add(info["id"]); clips.append(info)
         png = TMP / f"t{i}.png"
         text_layer(txt, kind).save(png)
         start = random.uniform(0.3, max(0.4, info["duration"] - CLIP_S - 0.5))
         seg = TMP / f"s{i}.mp4"
-        segment(raw, info["duration"], start, png, seg)
+        segment(raw, info["duration"], start, png, seg, animate=(i > 0))
         segs.append(seg)
 
     end_png = TMP / "end.png"
@@ -276,7 +367,7 @@ def main():
     run(["ffmpeg", "-y", "-ss", "1.2", "-i", str(reel), "-frames:v", "1", "-q:v", "3", str(OUT / "preview.jpg")])
 
     tags = " ".join(dict.fromkeys(topic.get("tags", []) + BASE_TAGS))
-    caption = (f"{topic['hook']}\n\n" + "\n".join(f"• {t}" for t in topic["tips"]) +
+    caption = (f"{topic['hook']}\n\n" + "\n".join(f"• {t}" for t, _ in topic["tips"]) +
                f"\n\nFollow {HANDLE} for a little home idea every day.\n\n{tags}\n\nVideo: Pexels")
     (OUT / "caption.txt").write_text(caption, encoding="utf-8")
     (OUT / "info.json").write_text(json.dumps({"topic": idx + 1, "hook": topic["hook"], "clips": clips,
