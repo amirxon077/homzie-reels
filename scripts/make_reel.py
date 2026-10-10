@@ -29,11 +29,15 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 BASE_TAGS = ["#hometips", "#homeorganization", "#kitchenorganization", "#homehacks",
              "#organizedhome", "#cozyhome", "#cleaningmotivation"]
 FALLBACK_Q = ["clean kitchen", "cozy home", "home organization", "kitchen counter", "tidy living room"]
-# Odob qoidasi: to'liq gavdali odam chiqadigan kliplar olinmaydi (Pexels sahifa nomi bo'yicha).
+# Odob va halol qoidasi: Pexels sahifa nomi bo'yicha chetlanadigan kliplar.
 # Qo'llar ("hands") qoladi - uy ishlarini ko'rsatish uchun yetarli.
 PEOPLE = re.compile(r"\b(woman|women|girl|girls|lady|ladies|female|model|man|men|boy|boys|guy|guys|couple|"
                     r"people|family|bikini|dress|skirt|legs|body|kid|kids|child|children|baby|teen|"
-                    r"mother|father|wife|husband|bride|dancing|dance|swimsuit|lingerie|selfie)\b")
+                    r"mother|father|wife|husband|bride|dancing|dance|swimsuit|lingerie|selfie|"
+                    # halol qoidalari: diniy bayramlar, sehr/qo'rqinchli, spirtli ichimlik, cho'chqa go'shti
+                    r"easter|christmas|xmas|santa|church|halloween|hanukkah|diwali|valentine|pumpkin carving|"
+                    r"witch|ghost|spooky|wine|beer|alcohol|cocktail|champagne|whiskey|vodka|bar|pub|"
+                    r"pork|bacon|ham|sausage|pig|piggy)\b")
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 
 
