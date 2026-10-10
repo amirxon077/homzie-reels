@@ -32,6 +32,7 @@ jobs:
       - name: Reel yasash
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TOPIC: ${{ inputs.topic }}
         run: python3 scripts/make_reel.py
 
