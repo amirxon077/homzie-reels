@@ -21,7 +21,7 @@ LOGO = ROOT / "assets" / "logo.jpg"
 TOPICS = json.loads((ROOT / "scripts" / "topics.json").read_text(encoding="utf-8"))
 
 W, H, FPS = 1080, 1920, 30
-CLIP_S, END_S = 3.2, 1.8
+CLIP_S, END_S = 4.0, 1.8
 CREAM, INK = (250, 246, 238), (24, 38, 32)
 HANDLE = "@homzie.us"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -135,6 +135,80 @@ def end_card(path):
     card.save(path)
 
 
+# ---------- ovoz (musiqasiz, CC0 uy ovozlari) ----------
+SOUNDS = json.loads((ROOT / "scripts" / "sounds.json").read_text(encoding="utf-8"))
+SFX_MAP = [  # qidiruv so'zidagi kalit -> ovoz turi (tartib muhim)
+    (("fridge", "refrigerator", "freezer", "eggs", "grocery"), "fridge"),
+    (("jar", "pantry", "spice", "label"), "jar"),
+    (("coffee table", "lamp", "window", "plants", "reading", "living room"), "click"),
+    (("coffee",), "coffee"),
+    (("dog", "pet", "paws"), "dog"),
+    (("wiping", "clean", "mirror", "baking soda"), "clean"),
+    (("sink", "washing", "dishwasher", "water", "herbs water"), "water"),
+    (("chopping", "cooking", "meal prep", "pot", "vegetables", "herbs", "fruit", "bananas", "berries", "apples"), "cook"),
+    (("bed", "duvet", "pillow", "blanket", "sofa", "laundry", "folding", "towel", "clothes"), "fabric"),
+    (("keys", "entryway", "shoes", "door"), "keys"),
+    (("drawer", "utensils", "organizer", "shelves", "counter", "kitchen", "appliances"), "drawer"),
+]
+SFX_CACHE = ROOT / ".sfx"
+
+
+def sfx_kind(query):
+    q = query.lower()
+    for keys, kind in SFX_MAP:
+        if any(k in q for k in keys):
+            return kind
+    return "drawer"
+
+
+def sfx_file(kind, rng):
+    sid, dur, path = rng.choice(SOUNDS[kind])
+    SFX_CACHE.mkdir(exist_ok=True)
+    dest = SFX_CACHE / f"{sid}.mp3"
+    if not dest.exists():
+        req = urllib.request.Request("https://cdn.freesound.org/previews/" + path, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as out:
+            shutil.copyfileobj(r, out)
+    return dest, float(dur), sid
+
+
+def build_audio(queries, total):
+    """Xona foni (past) + har kadr boshida mos uy ovozi + yakunda pop. -16 LUFS."""
+    out = TMP / "audio.m4a"
+    if LOCAL and not os.environ.get("LOCAL_SFX"):
+        run(["ffmpeg", "-y", "-f", "lavfi", "-t", f"{total}", "-i", "anullsrc=r=44100:cl=stereo", "-c:a", "aac", str(out)])
+        return out, []
+    rng = random.Random()
+    inputs, filters, labels, used = [], [], [], []
+    amb, amb_d, amb_id = sfx_file("ambience", rng)
+    off = rng.uniform(0, max(0.0, amb_d - total - 1))
+    inputs += ["-ss", f"{off:.2f}", "-t", f"{total:.2f}", "-i", str(amb)]
+    filters.append(f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.35,"
+                   f"afade=t=in:d=0.6,afade=t=out:st={total - 0.8:.2f}:d=0.8[a0]")
+    labels.append("[a0]"); used.append(["ambience", amb_id])
+    for i, q in enumerate(queries):
+        kind = sfx_kind(q)
+        f, d, sid = sfx_file(kind, rng)
+        n = len(labels)
+        inputs += ["-i", str(f)]
+        length = min(d, CLIP_S - 0.3)
+        delay = int((i * CLIP_S + 0.25) * 1000)
+        filters.append(f"[{n}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:{length:.2f},"
+                       f"afade=t=out:st={max(0.0, length - 0.4):.2f}:d=0.4,volume=0.9,adelay={delay}|{delay}[a{n}]")
+        labels.append(f"[a{n}]"); used.append([kind, sid])
+    f, d, sid = sfx_file("pop", rng)
+    n = len(labels)
+    inputs += ["-i", str(f)]
+    delay = int((len(queries) * CLIP_S + 0.15) * 1000)
+    filters.append(f"[{n}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.8,adelay={delay}|{delay}[a{n}]")
+    labels.append(f"[a{n}]"); used.append(["pop", sid])
+    filters.append("".join(labels) + f"amix=inputs={len(labels)}:normalize=0:duration=first,"
+                   f"loudnorm=I=-16:TP=-1.5:LRA=11,atrim=0:{total:.2f}[mix]")
+    run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[mix]",
+         "-ar", "44100", "-c:a", "aac", "-b:a", "128k", str(out)])
+    return out, used
+
+
 # ---------- yig'ish ----------
 def segment(src, dur, start, overlay_png, dest):
     run(["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{CLIP_S}", "-i", str(src),
@@ -182,17 +256,20 @@ def main():
     lst.write_text("".join(f"file '{s}'\n" for s in segs))
     joined = TMP / "joined.mp4"
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(joined)])
-    # Instagram ovoz yo'lini kutadi - jim (musiqasiz) audio qo'shamiz
+    # Ovoz: musiqasiz - xona foni + har kadrga mos uy ovozi (ASMR) + oxirida yumshoq "pop"
+    total = CLIP_S * len(segs[:-1]) + END_S
+    audio, sfx_used = build_audio(queries, total)
     reel = OUT / "reel.mp4"
-    run(["ffmpeg", "-y", "-i", str(joined), "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-         "-shortest", "-c:v", "copy", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", str(reel)])
+    run(["ffmpeg", "-y", "-i", str(joined), "-i", str(audio), "-map", "0:v", "-map", "1:a",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(reel)])
     run(["ffmpeg", "-y", "-ss", "1.2", "-i", str(reel), "-frames:v", "1", "-q:v", "3", str(OUT / "preview.jpg")])
 
     tags = " ".join(dict.fromkeys(topic.get("tags", []) + BASE_TAGS))
     caption = (f"{topic['hook']}\n\n" + "\n".join(f"• {t}" for t in topic["tips"]) +
                f"\n\nFollow {HANDLE} for a little home idea every day.\n\n{tags}\n\nVideo: Pexels")
     (OUT / "caption.txt").write_text(caption, encoding="utf-8")
-    (OUT / "info.json").write_text(json.dumps({"topic": idx + 1, "hook": topic["hook"], "clips": clips}, indent=1))
+    (OUT / "info.json").write_text(json.dumps({"topic": idx + 1, "hook": topic["hook"], "clips": clips,
+                                               "sounds": sfx_used}, indent=1))
 
     state["next_topic"] = (idx + 1) % len(TOPICS)
     state["used_videos"] = list(used)[-400:]
