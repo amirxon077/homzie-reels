@@ -11,7 +11,7 @@ sun'iy kadrlar ishlatiladi - faqat dizaynni tekshirish uchun.
 Natija: out/reel.mp4, out/caption.txt, out/preview.jpg, out/info.json
 Navbat va ishlatilgan kliplar: state/state.json (workflow repoga qaytarib saqlaydi).
 """
-import json, os, random, subprocess, sys, pathlib, shutil, textwrap, urllib.request, urllib.parse, urllib.error
+import json, os, random, re, subprocess, sys, pathlib, shutil, textwrap, urllib.request, urllib.parse, urllib.error
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -29,6 +29,11 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 BASE_TAGS = ["#hometips", "#homeorganization", "#kitchenorganization", "#homehacks",
              "#organizedhome", "#cozyhome", "#cleaningmotivation"]
 FALLBACK_Q = ["clean kitchen", "cozy home", "home organization", "kitchen counter", "tidy living room"]
+# Odob qoidasi: to'liq gavdali odam chiqadigan kliplar olinmaydi (Pexels sahifa nomi bo'yicha).
+# Qo'llar ("hands") qoladi - uy ishlarini ko'rsatish uchun yetarli.
+PEOPLE = re.compile(r"\b(woman|women|girl|girls|lady|ladies|female|model|man|men|boy|boys|guy|guys|couple|"
+                    r"people|family|bikini|dress|skirt|legs|body|kid|kids|child|children|baby|teen|"
+                    r"mother|father|wife|husband|bride|dancing|dance|swimsuit|lingerie|selfie)\b")
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 
 
@@ -62,7 +67,8 @@ def best_file(video):
 
 def fetch_clip(query, used, dest):
     for q in [query] + random.sample(FALLBACK_Q, len(FALLBACK_Q)):
-        vids = [v for v in pexels_search(q) if v["id"] not in used and v.get("duration", 0) >= 5 and best_file(v)]
+        vids = [v for v in pexels_search(q) if v["id"] not in used and v.get("duration", 0) >= 5 and best_file(v)
+                and not PEOPLE.search((v.get("url") or "").lower().replace("-", " "))]
         if not vids:
             continue
         v = random.choice(vids[:8])
@@ -183,7 +189,7 @@ def build_audio(queries, total):
     amb, amb_d, amb_id = sfx_file("ambience", rng)
     off = rng.uniform(0, max(0.0, amb_d - total - 1))
     inputs += ["-ss", f"{off:.2f}", "-t", f"{total:.2f}", "-i", str(amb)]
-    filters.append(f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.35,"
+    filters.append(f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo,loudnorm=I=-34:TP=-9,aresample=44100,"
                    f"afade=t=in:d=0.6,afade=t=out:st={total - 0.8:.2f}:d=0.8[a0]")
     labels.append("[a0]"); used.append(["ambience", amb_id])
     for i, q in enumerate(queries):
@@ -194,16 +200,17 @@ def build_audio(queries, total):
         length = min(d, CLIP_S - 0.3)
         delay = int((i * CLIP_S + 0.25) * 1000)
         filters.append(f"[{n}:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:{length:.2f},"
-                       f"afade=t=out:st={max(0.0, length - 0.4):.2f}:d=0.4,volume=0.9,adelay={delay}|{delay}[a{n}]")
+                       f"loudnorm=I=-17:TP=-3,aresample=44100,afade=t=out:st={max(0.0, length - 0.4):.2f}:d=0.4,adelay={delay}|{delay}[a{n}]")
         labels.append(f"[a{n}]"); used.append([kind, sid])
     f, d, sid = sfx_file("pop", rng)
     n = len(labels)
     inputs += ["-i", str(f)]
     delay = int((len(queries) * CLIP_S + 0.15) * 1000)
-    filters.append(f"[{n}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.8,adelay={delay}|{delay}[a{n}]")
+    filters.append(f"[{n}:a]aformat=sample_rates=44100:channel_layouts=stereo,loudnorm=I=-20:TP=-4,aresample=44100,"
+                   f"adelay={delay}|{delay}[a{n}]")
     labels.append(f"[a{n}]"); used.append(["pop", sid])
     filters.append("".join(labels) + f"amix=inputs={len(labels)}:normalize=0:duration=first,"
-                   f"loudnorm=I=-16:TP=-1.5:LRA=11,atrim=0:{total:.2f}[mix]")
+                   f"alimiter=limit=0.85:level=false,atrim=0:{total:.2f}[mix]")
     run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[mix]",
          "-ar", "44100", "-c:a", "aac", "-b:a", "128k", str(out)])
     return out, used
