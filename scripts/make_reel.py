@@ -12,6 +12,8 @@ Natija: out/reel.mp4, out/caption.txt, out/preview.jpg, out/info.json
 Navbat va ishlatilgan kliplar: state/state.json (workflow repoga qaytarib saqlaydi).
 """
 import base64, json, os, random, re, subprocess, time, sys, pathlib, shutil, textwrap, urllib.request, urllib.parse, urllib.error
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -21,13 +23,20 @@ LOGO = ROOT / "assets" / "logo.jpg"
 TOPICS = json.loads((ROOT / "scripts" / "topics.json").read_text(encoding="utf-8"))
 
 W, H, FPS = 1080, 1920, 30
-CLIP_S, END_S = 4.0, 1.8
+CLIP_S, END_S = 4.5, 1.8          # 4 klip x 4.5 s + yakuniy karta = ~20 s
 CREAM, INK = (250, 246, 238), (24, 38, 32)
 HANDLE = "@homzie.us"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
-BASE_TAGS = ["#homehacks", "#homeorganization", "#cleaningmotivation", "#hometips", "#kitchenorganization"]
-FALLBACK_Q = ["clean kitchen", "cozy home", "home organization", "kitchen counter", "tidy living room"]
+# Kontent ustunlari (12-okt qarori): A - muzlatgich va oshxona tartibi, B - tezkor uy hiylalari, C - uydagi baxtli it.
+# Hafta jadvali Nyu-York kuni bo'yicha: Du A, Se B, Cho A, Pa C, Ju A, Sha B, Ya C
+SCHEDULE = "ABACABC"
+PILLAR_TAGS = {"A": ["#kitchenorganization", "#fridgeorganization", "#homehacks"],
+               "B": ["#homehacks", "#cleaningmotivation", "#homeorganization"],
+               "C": ["#dogenrichment", "#doglife", "#dogsofinstagram"]}
+FALLBACK_Q = {"A": ["clean kitchen", "kitchen counter", "refrigerator food", "pantry shelves"],
+              "B": ["cozy home", "home organization", "tidy living room", "clean bathroom"],
+              "C": ["dog at home", "dog playing", "dog sleeping", "dog sniffing"]}
 # Odob va halol qoidasi: Pexels sahifa nomi bo'yicha chetlanadigan kliplar.
 # Qo'llar ("hands") qoladi - uy ishlarini ko'rsatish uchun yetarli.
 PEOPLE = re.compile(r"\b(woman|women|girl|girls|lady|ladies|female|model|man|men|boy|boys|guy|guys|couple|"
@@ -103,7 +112,7 @@ def gemini_pick(caption, vids):
     if not model:
         return None, -1
     parts = [{"text": (
-        "You pick a stock video clip for a short, wordless Instagram reel with home and kitchen tips. "
+        "You pick a stock video clip for a short, wordless Instagram reel with home, kitchen and dog-care tips. "
         f'The on-screen caption for this clip is: "{caption}".\n'
         f"Below are {len(vids)} candidate frames, numbered 1 to {len(vids)} in order.\n"
         "Reject a frame if it shows: a person in revealing clothing (shorts, short skirt, bare shoulders, swimwear), "
@@ -141,9 +150,9 @@ def gemini_pick(caption, vids):
     return None, -1
 
 
-def fetch_clip(query, used, dest, caption=""):
+def fetch_clip(query, used, dest, caption="", pillar="A"):
     first = None   # Gemini hammasini rad etsa - birinchi so'zdagi filtrdan o'tgan klip olinadi
-    for q in [query] + random.sample(FALLBACK_Q, 2) + [None]:
+    for q in [query] + random.sample(FALLBACK_Q[pillar], 2) + [None]:
         if q is None:
             if not first:
                 break
@@ -330,11 +339,20 @@ def main():
     if TMP.exists():
         shutil.rmtree(TMP)
     TMP.mkdir()
-    state = json.loads(STATE.read_text()) if STATE.exists() else {"next_topic": 0, "used_videos": []}
+    state = json.loads(STATE.read_text()) if STATE.exists() else {"used_videos": []}
+    nxt = state.setdefault("next_by_pillar", {})
     want = os.environ.get("TOPIC", "").strip()
-    idx = (int(want) - 1) if want.isdigit() else state["next_topic"] % len(TOPICS)
+    if want.isdigit():                       # qo'lda aniq mavzu raqami berilgan
+        idx = int(want) - 1
+    else:                                    # hafta jadvali: bugun Nyu-Yorkda qaysi ustun
+        pillar = os.environ.get("PILLAR", "").strip().upper() or SCHEDULE[datetime.now(ZoneInfo("America/New_York")).weekday()]
+        pool = [i for i, t in enumerate(TOPICS) if t["pillar"] == pillar]
+        k = nxt.get(pillar, 0) % len(pool)
+        idx = pool[k]
+        nxt[pillar] = (k + 1) % len(pool)
     topic = TOPICS[idx]
-    print(f"Mavzu {idx + 1}/{len(TOPICS)}: {topic['hook']}")
+    pillar = topic["pillar"]
+    print(f"Mavzu {idx + 1}/{len(TOPICS)} (ustun {pillar}, {topic['format']}): {topic['hook']}")
     used = set(state.get("used_videos", []))
 
     texts = [(topic["hook"], "hook")] + [(t, "tip") for t, _ in topic["tips"]]
@@ -342,7 +360,7 @@ def main():
     segs, clips = [], []
     for i, ((txt, kind), q) in enumerate(zip(texts, queries)):
         raw = TMP / f"raw{i}.mp4"
-        info = fake_clip(i, raw) if LOCAL else fetch_clip(q, used, raw, caption=txt)
+        info = fake_clip(i, raw) if LOCAL else fetch_clip(q, used, raw, caption=txt, pillar=pillar)
         used.add(info["id"]); clips.append(info)
         png = TMP / f"t{i}.png"
         text_layer(txt, kind).save(png)
@@ -371,15 +389,15 @@ def main():
     run(["ffmpeg", "-y", "-ss", "1.2", "-i", str(reel), "-frames:v", "1", "-q:v", "3", str(OUT / "preview.jpg")])
 
     # Instagram 2025-12 dan beri 5 tadan ortiq heshtegni qabul qilmaydi - mavzuga oid 5 tasi yetarli
-    tags = " ".join(list(dict.fromkeys(topic.get("tags", []) + BASE_TAGS))[:5])
+    tags = " ".join(list(dict.fromkeys(topic.get("tags", []) + PILLAR_TAGS[pillar]))[:5])
     caption = (f"{topic['hook']}\n\n" + "\n".join(f"• {t}" for t, _ in topic["tips"]) +
                f"\n\nWhich tip will you try first? Save this for later 📌"
                f"\nFollow {HANDLE} for a little home idea every day.\n\n{tags}\n\nVideo: Pexels")
     (OUT / "caption.txt").write_text(caption, encoding="utf-8")
-    (OUT / "info.json").write_text(json.dumps({"topic": idx + 1, "hook": topic["hook"], "clips": clips,
-                                               "sounds": sfx_used}, indent=1))
+    (OUT / "info.json").write_text(json.dumps({"topic": idx + 1, "pillar": pillar, "format": topic["format"],
+                                               "hook": topic["hook"], "clips": clips, "sounds": sfx_used}, indent=1))
 
-    state["next_topic"] = (idx + 1) % len(TOPICS)
+    state.pop("next_topic", None)
     state["used_videos"] = list(used)[-400:]
     if not LOCAL:
         STATE.write_text(json.dumps(state, indent=1))
