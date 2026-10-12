@@ -308,6 +308,11 @@ def build_audio(queries, total):
 
 
 # ---------- yig'ish ----------
+# Instagram talabi: H.264, yopiq GOP, 4:2:0, video bitreyti 5 Mbit/s dan oshmasin
+VENC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-maxrate", "4500k", "-bufsize", "9000k",
+        "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", str(FPS)]
+
+
 def segment(src, dur, start, overlay_png, dest, animate=True):
     # 1-kadrda sarlavha darhol ko'rinadi (odam birinchi soniyada to'xtashi uchun), qolganlari chiqib keladi
     txt = ("[1:v]format=rgba,fade=t=in:st=0.1:d=0.35:alpha=1[t];[v][t]overlay=x=0:y='if(lt(t,0.5),45*(1-t/0.5),0)'"
@@ -318,7 +323,7 @@ def segment(src, dur, start, overlay_png, dest, animate=True):
          f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS},setsar=1,"
          f"eq=contrast=1.04:saturation=1.08:brightness=0.01,colorbalance=rs=0.04:gs=0.01:bs=-0.04[v];"
          f"{txt},format=yuv420p[o]",
-         "-map", "[o]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", str(FPS), str(dest)])
+         "-map", "[o]", "-an", *VENC, str(dest)])
 
 
 def main():
@@ -351,7 +356,7 @@ def main():
     end_card(end_png)
     end_mp4 = TMP / "end.mp4"
     run(["ffmpeg", "-y", "-loop", "1", "-t", f"{END_S}", "-i", str(end_png), "-vf", f"fps={FPS},format=yuv420p",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", str(FPS), str(end_mp4)])
+         *VENC, str(end_mp4)])
     segs.append(end_mp4)
 
     lst = TMP / "list.txt"
