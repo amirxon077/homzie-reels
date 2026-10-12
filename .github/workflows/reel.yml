@@ -1,12 +1,23 @@
 name: Reel
 
 on:
+  schedule:
+    # Har kuni Nyu-York vaqti bilan 12:00. GitHub cron UTC'da ishlaydi:
+    # yozgi vaqtda (noyabr boshigacha) 16:00 UTC, qishda 17:00 UTC.
+    # Ikkalasi ham ishga tushadi, "Vaqtni tekshirish" qadami keraksizini to'xtatadi.
+    - cron: "0 16 * * *"
+    - cron: "0 17 * * *"
   workflow_dispatch:
     inputs:
       topic:
         description: "Mavzu raqami (1-30). Bo'sh qolsa navbatdagisi"
         required: false
         default: ""
+      joylash:
+        description: "Instagram'ga joylansinmi?"
+        type: choice
+        options: ["yo'q", "ha"]
+        default: "yo'q"
 
 permissions:
   contents: write
@@ -15,14 +26,32 @@ concurrency:
   group: reel
   cancel-in-progress: false
 
+env:
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   reel:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
+      - name: Vaqtni tekshirish
+        id: gate
+        run: |
+          H=$(TZ=America/New_York date +%H)
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "go=1" >> "$GITHUB_OUTPUT"
+            echo "post=${{ inputs.joylash == 'ha' && '1' || '0' }}" >> "$GITHUB_OUTPUT"
+          elif [ "$H" = "12" ]; then
+            echo "go=1" >> "$GITHUB_OUTPUT"; echo "post=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nyu-Yorkda hozir soat $H - bugungi reel boshqa ishga tushirishda chiqadi"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.go == '1'
 
       - name: ffmpeg o'rnatish
+        if: steps.gate.outputs.go == '1'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg > /dev/null
@@ -30,6 +59,7 @@ jobs:
           python3 -c "import PIL" 2>/dev/null || pip install --quiet pillow
 
       - name: Reel yasash
+        if: steps.gate.outputs.go == '1'
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -37,6 +67,7 @@ jobs:
         run: python3 scripts/make_reel.py
 
       - name: Natijani saqlash
+        if: steps.gate.outputs.go == '1'
         uses: actions/upload-artifact@v4
         with:
           name: reel-${{ github.run_number }}
@@ -44,6 +75,7 @@ jobs:
           retention-days: 3
 
       - name: Navbatni repoga yozish
+        if: steps.gate.outputs.go == '1'
         run: |
           git config user.name "homzie-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -51,8 +83,45 @@ jobs:
           git commit -m "Reel ${{ github.run_number }}: navbat yangilandi" || echo "o'zgarish yo'q"
           git push
 
+      # Instagram videoni ochiq havoladan yuklab oladi. Videolar "media" branch'iga qo'yiladi
+      # (GitHub Pages shu branch'dan ochiq beradi). Faqat oxirgi 5 ta video saqlanadi, tarix yo'q.
+      - name: Videoni ochiq havolaga chiqarish
+        id: pub
+        if: steps.gate.outputs.go == '1' && steps.gate.outputs.post == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NAME="reel-$(date -u +%Y%m%d-%H%M%S).mp4"
+          mkdir -p /tmp/media && cd /tmp/media
+          git init -q -b media
+          git config user.name "homzie-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          if git fetch -q --depth 1 origin media 2>/dev/null; then git checkout -q FETCH_HEAD -- . ; fi
+          mkdir -p reels && touch .nojekyll
+          cp "$GITHUB_WORKSPACE/out/reel.mp4" "reels/$NAME"
+          ls reels/*.mp4 | sort | head -n -5 | xargs -r git rm -q -f --ignore-unmatch
+          ls reels/*.mp4 | sort | head -n -5 | xargs -r rm -f
+          git add -A && git commit -q -m "reel $NAME"
+          git push -q -f origin HEAD:media
+          OWNER="${{ github.repository_owner }}"; REPO="${{ github.event.repository.name }}"
+          URL="https://${OWNER,,}.github.io/${REPO}/reels/${NAME}"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Kutilmoqda: $URL"
+          for i in $(seq 1 40); do
+            if curl -sfI "$URL" > /dev/null; then echo "Video ochiq havolada tayyor"; exit 0; fi
+            sleep 15
+          done
+          echo "Video 10 daqiqada ochiq havolada paydo bo'lmadi (GitHub Pages yoqilganmi?)"; exit 1
+
+      - name: Instagram'ga joylash (Make)
+        if: steps.gate.outputs.go == '1' && steps.gate.outputs.post == '1'
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+        run: python3 scripts/post_make.py "${{ steps.pub.outputs.url }}"
+
       - name: Xulosa
-        if: always()
+        if: always() && steps.gate.outputs.go == '1'
         run: |
           if [ -f out/info.json ]; then
             echo "## Reel ${{ github.run_number }}" >> "$GITHUB_STEP_SUMMARY"
