@@ -26,8 +26,7 @@ CREAM, INK = (250, 246, 238), (24, 38, 32)
 HANDLE = "@homzie.us"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
-BASE_TAGS = ["#hometips", "#homeorganization", "#kitchenorganization", "#homehacks",
-             "#organizedhome", "#cozyhome", "#cleaningmotivation"]
+BASE_TAGS = ["#homehacks", "#homeorganization", "#cleaningmotivation", "#hometips", "#kitchenorganization"]
 FALLBACK_Q = ["clean kitchen", "cozy home", "home organization", "kitchen counter", "tidy living room"]
 # Odob va halol qoidasi: Pexels sahifa nomi bo'yicha chetlanadigan kliplar.
 # Qo'llar ("hands") qoladi - uy ishlarini ko'rsatish uchun yetarli.
@@ -371,9 +370,11 @@ def main():
          "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(reel)])
     run(["ffmpeg", "-y", "-ss", "1.2", "-i", str(reel), "-frames:v", "1", "-q:v", "3", str(OUT / "preview.jpg")])
 
-    tags = " ".join(dict.fromkeys(topic.get("tags", []) + BASE_TAGS))
+    # Instagram 2025-12 dan beri 5 tadan ortiq heshtegni qabul qilmaydi - mavzuga oid 5 tasi yetarli
+    tags = " ".join(list(dict.fromkeys(topic.get("tags", []) + BASE_TAGS))[:5])
     caption = (f"{topic['hook']}\n\n" + "\n".join(f"• {t}" for t, _ in topic["tips"]) +
-               f"\n\nFollow {HANDLE} for a little home idea every day.\n\n{tags}\n\nVideo: Pexels")
+               f"\n\nWhich tip will you try first? Save this for later 📌"
+               f"\nFollow {HANDLE} for a little home idea every day.\n\n{tags}\n\nVideo: Pexels")
     (OUT / "caption.txt").write_text(caption, encoding="utf-8")
     (OUT / "info.json").write_text(json.dumps({"topic": idx + 1, "hook": topic["hook"], "clips": clips,
                                                "sounds": sfx_used}, indent=1))
