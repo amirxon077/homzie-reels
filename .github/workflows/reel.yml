@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       topic:
-        description: "Mavzu raqami (1-30). Bo'sh qolsa navbatdagisi"
+        description: "Mavzu raqami (1-42). Bo'sh qolsa bugungi ustundan navbatdagisi"
         required: false
         default: ""
       joylash:
