@@ -79,15 +79,16 @@ def best_file(video):
 
 # ---------- Gemini: kadr matnga mosmi va odobga to'g'rimi ----------
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-_model = None
+_models = None
 
 
-def gemini_model():
-    """Bepul ishlaydigan eng yangi 'flash' modelni o'zi topadi (nomlar tez-tez yangilanadi)."""
-    global _model
-    if _model is not None:
-        return _model
-    _model = ""
+def gemini_models():
+    """Bepul ishlaydigan 'flash' modellarni o'zi topadi (nomlar tez-tez yangilanadi).
+    Tartib: eng yangi flash, keyin eskiroq flash, oxirida flash-lite. Biri band (503) bo'lsa keyingisiga o'tiladi."""
+    global _models
+    if _models is not None:
+        return _models
+    _models = []
     try:
         req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
                                      headers={"x-goog-api-key": GEMINI_KEY})
@@ -95,21 +96,21 @@ def gemini_model():
             models = json.load(r).get("models", [])
         names = [m["name"].split("/", 1)[1] for m in models
                  if "generateContent" in m.get("supportedGenerationMethods", [])
-                 and re.fullmatch(r"gemini-\d+(\.\d+)?-flash(-latest)?", m["name"].split("/", 1)[1])]
+                 and re.fullmatch(r"gemini-\d+(\.\d+)?-flash(-lite)?(-latest)?", m["name"].split("/", 1)[1])]
         ver = lambda n: float(re.search(r"gemini-(\d+(?:\.\d+)?)", n).group(1))
-        names.sort(key=lambda n: (ver(n), not n.endswith("latest")), reverse=True)
-        _model = names[0] if names else ""
+        names.sort(key=lambda n: ("-lite" not in n, ver(n), not n.endswith("latest")), reverse=True)
+        _models = names[:4]
     except Exception as e:  # noqa: BLE001
         print(f"  Gemini modellar ro'yxati olinmadi: {e}")
-    print(f"  Gemini modeli: {_model or '-'}")
-    return _model
+    print(f"  Gemini modellari: {', '.join(_models) or '-'}")
+    return _models
 
 
 def gemini_pick(caption, vids):
     """Nomzod kadrlar ichidan matnga eng mosini tanlaydi. Odobsiz/nomaqbul kadrlarni rad etadi.
     Qaytaradi: (video yoki None, ball). Gemini ishlamasa (None, -1)."""
-    model = gemini_model() if GEMINI_KEY else ""
-    if not model:
+    models = gemini_models() if GEMINI_KEY else []
+    if not models:
         return None, -1
     parts = [{"text": (
         "You pick a stock video clip for a short, wordless Instagram reel with home, kitchen and dog-care tips. "
@@ -127,26 +128,28 @@ def gemini_pick(caption, vids):
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}})
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
-    req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(body).encode(), headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                resp = json.load(r)
-            text = "".join(p.get("text", "") for p in resp["candidates"][0]["content"]["parts"] if not p.get("thought"))
-            ans = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
-            best, score = int(ans.get("best", 0)), float(ans.get("score", 0))
-            time.sleep(4)   # bepul limit: daqiqasiga bir necha so'rov
-            return (vids[best - 1] if 1 <= best <= len(vids) else None), score
-        except urllib.error.HTTPError as e:
-            print(f"  Gemini {e.code}: {e.read()[:200]!r}")
-            if e.code in (429, 500, 503):
-                time.sleep(20 * (attempt + 1)); continue
-            break
-        except Exception as e:  # noqa: BLE001
-            print(f"  Gemini javobi tushunilmadi: {e}")
-            break
+    data = json.dumps(body).encode()
+    for model in models:
+        for attempt in range(2):
+            req = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                data=data, headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    resp = json.load(r)
+                text = "".join(p.get("text", "") for p in resp["candidates"][0]["content"]["parts"] if not p.get("thought"))
+                ans = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
+                best, score = int(ans.get("best", 0)), float(ans.get("score", 0))
+                time.sleep(4)   # bepul limit: daqiqasiga bir necha so'rov
+                return (vids[best - 1] if 1 <= best <= len(vids) else None), score
+            except urllib.error.HTTPError as e:
+                print(f"  Gemini {model} {e.code}: {e.read()[:120]!r}")
+                if e.code == 429 and attempt == 0:
+                    time.sleep(15); continue     # daqiqalik limit - biroz kutib yana
+                break                            # band (503) yoki boshqa xato - keyingi modelga
+            except Exception as e:  # noqa: BLE001
+                print(f"  Gemini {model} javobi tushunilmadi: {e}")
+                break
     return None, -1
 
 
